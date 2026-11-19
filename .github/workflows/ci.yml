@@ -1,0 +1,120 @@
+name: ci
+on:
+  push: {branches: [main]}
+  pull_request:
+  workflow_dispatch:
+permissions: {}
+jobs:
+  lint:
+    permissions: {contents: read}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - run: shellcheck install.sh
+  test:
+    permissions: {contents: read}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix: {os: [ubuntu-latest, macos-latest, windows-latest]}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run: {shell: bash}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      # The action's tests run against the real binary built from skigard's main, served from localhost.
+      # No release exists to download from, which is what the base-url input is for.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {repository: ambierhq/skigard, path: skigard-src, persist-credentials: false}
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with: {go-version-file: skigard-src/go.mod, cache: false}
+      - name: build and package a fake release, serve it
+        id: dist
+        run: |
+          case "$RUNNER_OS" in Linux) goos=linux ;; macOS) goos=darwin ;; Windows) goos=windows ;; esac
+          case "$RUNNER_ARCH" in X64) goarch=amd64 ;; ARM64) goarch=arm64 ;; esac
+          (cd skigard-src && go build -trimpath -ldflags "-X github.com/ambierhq/skigard/internal/cli.Version=0.0.1" -o ../skigard-bin ./cmd/skigard)
+          sha="$(python3 test/make-dist.py skigard-bin 0.0.1 "$RUNNER_TEMP/dist" "$goos" "$goarch")"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          # a tampered copy: archive changed after checksums.txt was written
+          cp -r "$RUNNER_TEMP/dist" "$RUNNER_TEMP/dist-bad"
+          printf 'tamper' >> "$RUNNER_TEMP"/dist-bad/skigard_0.0.1_*
+          (cd "$RUNNER_TEMP/dist" && nohup python3 -m http.server 18431 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          (cd "$RUNNER_TEMP/dist-bad" && nohup python3 -m http.server 18432 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 3
+          curl -fsS http://127.0.0.1:18431/checksums.txt
+      - name: a clean project verifies
+        id: ok
+        uses: ./
+        with:
+          version: 0.0.1
+          base-url: http://127.0.0.1:18431
+      - name: output and PATH
+        env:
+          VERSION_OUT: ${{ steps.ok.outputs.version }}
+        run: |
+          test "$VERSION_OUT" = "skigard 0.0.1"
+          skigard version | grep -x 'skigard 0.0.1'
+      - name: pinned sha256 is accepted
+        uses: ./
+        with:
+          version: 0.0.1
+          base-url: http://127.0.0.1:18431
+          sha256: ${{ steps.dist.outputs.sha }}
+          args: ""
+      - name: a wrong pinned sha256 fails
+        id: wrong
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.0.1
+          base-url: http://127.0.0.1:18431
+          sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+      - name: a tampered archive fails
+        id: tampered
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.0.1
+          base-url: http://127.0.0.1:18432
+      - name: a version like "latest" fails
+        id: latest
+        continue-on-error: true
+        uses: ./
+        with:
+          version: latest
+          base-url: http://127.0.0.1:18431
+      - name: a non-local http base-url fails
+        id: remote
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.0.1
+          base-url: http://example.com/skigard
+      - name: the failures above failed for the right reason
+        env:
+          WRONG: ${{ steps.wrong.outcome }}
+          TAMPERED: ${{ steps.tampered.outcome }}
+          LATEST: ${{ steps.latest.outcome }}
+          REMOTE: ${{ steps.remote.outcome }}
+        run: |
+          for o in "$WRONG" "$TAMPERED" "$LATEST" "$REMOTE"; do test "$o" = failure || { echo "expected failure, got $o"; exit 1; }; done
+      - name: plant an unapproved skill in the project store
+        run: |
+          mkdir -p proj/.skigard/skills/rogue
+          echo "# rogue" > proj/.skigard/skills/rogue/SKILL.md
+      - name: the action fails the job on an unapproved skill in the store
+        id: drift
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.0.1
+          base-url: http://127.0.0.1:18431
+          working-directory: proj
+      - name: drift was detected
+        env:
+          DRIFT: ${{ steps.drift.outcome }}
+        run: test "$DRIFT" = failure

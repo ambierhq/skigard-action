@@ -1,0 +1,59 @@
+name: skigard verify
+description: Install a pinned, checksum-verified skigard release and run `skigard verify` on your repository's approved skills.
+author: Ambier Oy
+branding:
+  icon: shield
+  color: orange
+inputs:
+  version:
+    description: "skigard version to install, exactly as released, without the leading v (for example 0.1.0). There is no default on purpose: pin it."
+    required: true
+  sha256:
+    description: "Optional SHA-256 of the release archive for this runner (from the release's checksums.txt). When set, the download must match it, so a compromised release page cannot change what you run."
+    required: false
+    default: ""
+  args:
+    description: "Arguments for `skigard verify`. Use an empty string to only install."
+    required: false
+    default: "--strict"
+  home:
+    description: "SKIGARD_HOME for the run: where skigard.lock and the approved store live, relative to working-directory. Project scope is .skigard."
+    required: false
+    default: ".skigard"
+  working-directory:
+    description: "Directory to run in."
+    required: false
+    default: "."
+  verify:
+    description: "Set to false to install skigard without running verify."
+    required: false
+    default: "true"
+  base-url:
+    description: "Where to download release assets from. Defaults to the GitHub release for `version`. Only https://, file:// and http://localhost / 127.0.0.1 are accepted. Used by this action's own tests and for mirrors."
+    required: false
+    default: ""
+outputs:
+  version:
+    description: "The installed skigard version string."
+    value: ${{ steps.install.outputs.version }}
+runs:
+  using: composite
+  steps:
+    - id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_SHA256: ${{ inputs.sha256 }}
+        INPUT_BASE_URL: ${{ inputs.base-url }}
+      run: bash "$GITHUB_ACTION_PATH/install.sh"
+    - id: verify
+      if: inputs.verify == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        INPUT_ARGS: ${{ inputs.args }}
+        SKIGARD_HOME: ${{ inputs.home }}
+      run: |
+        set -f  # the args are word-split, never globbed
+        # shellcheck disable=SC2086
+        skigard verify $INPUT_ARGS
