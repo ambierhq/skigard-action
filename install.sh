@@ -2,11 +2,16 @@
 # Download a skigard release, verify its SHA-256, put it on PATH. Used by action.yml; runs on Linux, macOS and Windows
 # (Git Bash). Inputs arrive as environment variables, never interpolated into the script.
 set -euo pipefail
-version="${INPUT_VERSION:-}"; want="${INPUT_SHA256:-}"; base="${INPUT_BASE_URL:-}"
+version="${INPUT_VERSION:-}"; want="${INPUT_SHA256:-}"; base="${INPUT_BASE_URL:-}"; sigverify="${INPUT_VERIFY_SIGNATURE:-false}"
 die() { echo "::error::skigard-action: $*" >&2; exit 1; }
 
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || die "version must look like 0.1.0 (got '$version'); there is no 'latest' on purpose"
 [ -z "$want" ] || [[ "$want" =~ ^[0-9a-fA-F]{64}$ ]] || die "sha256 must be 64 hex characters"
+
+case "$sigverify" in true | false) ;; *) die "verify-signature must be true or false (got '$sigverify')" ;; esac
+if [ "$sigverify" = true ] && ! command -v cosign >/dev/null 2>&1; then
+  die "verify-signature is true but cosign is not on PATH; add sigstore/cosign-installer (pinned by SHA) before this action"
+fi
 
 case "${RUNNER_OS:-$(uname -s)}" in
   Linux) os=linux; ext=tar.gz; exe=skigard ;;
@@ -37,6 +42,17 @@ file="skigard_${version}_${os}_${arch}.${ext}"
 echo "downloading $base/$file"
 curl -fsSL --retry 3 --proto '=https,http,file' -o "$tmp/$file" "$base/$file" || die "cannot download $base/$file"
 curl -fsSL --retry 3 --proto '=https,http,file' -o "$tmp/checksums.txt" "$base/checksums.txt" || die "cannot download $base/checksums.txt"
+
+if [ "$sigverify" = true ]; then
+  curl -fsSL --retry 3 --proto '=https,http,file' -o "$tmp/checksums.txt.sigstore.json" "$base/checksums.txt.sigstore.json" || die "cannot download $base/checksums.txt.sigstore.json"
+  # Only the skigard release workflow, at the tag of this exact version, may have signed checksums.txt.
+  ident="^https://github\\.com/ambierhq/skigard/\\.github/workflows/release\\.yml@refs/tags/v${version//./\\.}\$"
+  cosign verify-blob --bundle "$tmp/checksums.txt.sigstore.json" \
+    --certificate-identity-regexp "$ident" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    "$tmp/checksums.txt" || die "cosign signature verification of checksums.txt failed"
+  echo "cosign signature ok"
+fi
 
 expected="$(awk -v f="$file" '$2 == f {print $1}' "$tmp/checksums.txt")"
 [ -n "$expected" ] || die "checksums.txt has no entry for $file"
