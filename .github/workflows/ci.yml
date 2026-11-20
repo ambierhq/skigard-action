@@ -118,3 +118,108 @@ jobs:
         env:
           DRIFT: ${{ steps.drift.outcome }}
         run: test "$DRIFT" = failure
+  # Runs against the real, published release (no base-url): the download, checksums.txt and the signature are all real.
+  real-release:
+    permissions: {contents: read}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # sha256 values copied from https://github.com/ambierhq/skigard/releases/download/v0.1.1/checksums.txt
+          - {os: ubuntu-latest, sha: aaba12fad21e4a9997ac0c4764f7a33202f1371c143fd27144875bc814b56024}
+          - {os: macos-latest, sha: be1ee02f3a04a7e865e29ca0c6d7d481ffa7ecabdf61f6f846cfdeab98a041a2}
+          - {os: windows-latest, sha: 291c472dffd7049ad1a9eb90d3c9ab1633a8691b8a69ff0693fc24b65adf298c}
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run: {shell: bash}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - name: projects, one empty and one with an unapproved skill
+        run: |
+          mkdir -p proj-empty proj-drift/.skigard/skills/rogue
+          echo "# rogue" > proj-drift/.skigard/skills/rogue/SKILL.md
+      - name: verify-signature without cosign installed is refused
+        id: nocosign
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.1.1
+          verify-signature: "true"
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+      - name: an empty project verifies (nothing approved, nothing to disagree)
+        id: empty
+        uses: ./
+        with:
+          version: 0.1.1
+          working-directory: proj-empty
+      - name: output and PATH
+        env:
+          VERSION_OUT: ${{ steps.empty.outputs.version }}
+        run: |
+          test "$VERSION_OUT" = "skigard 0.1.1"
+          skigard version | grep -x 'skigard 0.1.1'
+      - name: the real sha256 from checksums.txt is accepted
+        uses: ./
+        with:
+          version: 0.1.1
+          sha256: ${{ matrix.sha }}
+          args: ""
+      - name: a wrong sha256 is refused against the real release
+        id: wrong
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.1.1
+          sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+          args: ""
+      - name: the real signature verifies
+        uses: ./
+        with:
+          version: 0.1.1
+          verify-signature: "true"
+          sha256: ${{ matrix.sha }}
+      - name: a bad verify-signature value is refused
+        id: badval
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.1.1
+          verify-signature: "maybe"
+      - name: verify fails on the unapproved skill
+        id: drift
+        continue-on-error: true
+        uses: ./
+        with:
+          version: 0.1.1
+          working-directory: proj-drift
+      - name: tampered checksums.txt is rejected by cosign
+        env:
+          INPUT_VERSION: "0.1.1"
+          INPUT_VERIFY_SIGNATURE: "true"
+        run: |
+          base=https://github.com/ambierhq/skigard/releases/download/v0.1.1
+          mkdir srv && cd srv
+          for f in checksums.txt checksums.txt.sigstore.json "skigard_0.1.1_$(echo "$RUNNER_OS" | sed 's/Linux/linux/;s/macOS/darwin/;s/Windows/windows/')_$([ "$RUNNER_ARCH" = ARM64 ] && echo arm64 || echo amd64).$([ "$RUNNER_OS" = Windows ] && echo zip || echo tar.gz)"; do
+            curl -fsSL --retry 3 -O "$base/$f"
+          done
+          # change only an unrelated line, so the archive's own checksum would still match: only the signature can catch it
+          sed -i.bak '/\.deb$/s/^./0/' checksums.txt && rm checksums.txt.bak
+          (nohup python3 -m http.server 18433 --bind 127.0.0.1 >/dev/null 2>&1 &)
+          sleep 3
+          cd ..
+          set +e
+          INPUT_BASE_URL=http://127.0.0.1:18433 bash ./install.sh >out.txt 2>&1
+          rc=$?
+          cat out.txt
+          test "$rc" -ne 0
+          grep -q 'cosign signature verification of checksums.txt failed' out.txt
+      - name: the failures above failed for the right reason
+        env:
+          WRONG: ${{ steps.wrong.outcome }}
+          NOCOSIGN: ${{ steps.nocosign.outcome }}
+          BADVAL: ${{ steps.badval.outcome }}
+          DRIFT: ${{ steps.drift.outcome }}
+        run: |
+          for o in "$WRONG" "$NOCOSIGN" "$BADVAL" "$DRIFT"; do test "$o" = failure || { echo "expected failure, got $o"; exit 1; }; done

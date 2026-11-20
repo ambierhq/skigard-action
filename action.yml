@@ -3,7 +3,7 @@ description: Install a pinned, checksum-verified skigard release and run `skigar
 author: Ambier Oy
 branding:
   icon: shield
-  color: orange
+  color: blue
 inputs:
   version:
     description: "skigard version to install, exactly as released, without the leading v (for example 0.1.0). There is no default on purpose: pin it."
@@ -28,6 +28,10 @@ inputs:
     description: "Set to false to install skigard without running verify."
     required: false
     default: "true"
+  verify-signature:
+    description: "Set to true to verify the cosign (Sigstore keyless) signature of checksums.txt before trusting it. Requires `cosign` on PATH (install it with sigstore/cosign-installer pinned by SHA); fails if cosign is missing. The signer must be skigard's release.yml workflow at the tag v<version>, so a mirror (base-url) must serve the unmodified release assets, including checksums.txt.sigstore.json."
+    required: false
+    default: "false"
   base-url:
     description: "Where to download release assets from. Defaults to the GitHub release for `version`. Only https://, file:// and http://localhost / 127.0.0.1 are accepted. Used by this action's own tests and for mirrors."
     required: false
@@ -45,6 +49,7 @@ runs:
         INPUT_VERSION: ${{ inputs.version }}
         INPUT_SHA256: ${{ inputs.sha256 }}
         INPUT_BASE_URL: ${{ inputs.base-url }}
+        INPUT_VERIFY_SIGNATURE: ${{ inputs.verify-signature }}
       run: bash "$GITHUB_ACTION_PATH/install.sh"
     - id: verify
       if: inputs.verify == 'true'
