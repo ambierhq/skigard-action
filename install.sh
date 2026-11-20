@@ -46,9 +46,10 @@ curl -fsSL --retry 3 --proto '=https,http,file' -o "$tmp/checksums.txt" "$base/c
 if [ "$sigverify" = true ]; then
   curl -fsSL --retry 3 --proto '=https,http,file' -o "$tmp/checksums.txt.sigstore.json" "$base/checksums.txt.sigstore.json" || die "cannot download $base/checksums.txt.sigstore.json"
   # Only the skigard release workflow, at the tag of this exact version, may have signed checksums.txt.
-  ident="^https://github\\.com/ambierhq/skigard/\\.github/workflows/release\\.yml@refs/tags/v${version//./\\.}\$"
+  # An exact identity (not a regexp): on Windows runners Git Bash's path conversion mangles a regexp that starts with ^https://.
+  ident="https://github.com/ambierhq/skigard/.github/workflows/release.yml@refs/tags/v${version}"
   cosign verify-blob --bundle "$tmp/checksums.txt.sigstore.json" \
-    --certificate-identity-regexp "$ident" \
+    --certificate-identity "$ident" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
     "$tmp/checksums.txt" || die "cosign signature verification of checksums.txt failed"
   echo "cosign signature ok"
